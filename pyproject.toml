@@ -1,0 +1,50 @@
+[project]
+name = "ubiquitous-eureka"
+version = "0.1.0"
+description = "Description goes here..."
+readme = "README.md"
+authors = [
+    { name = "Kristin Ding", email = "haozhd2@uw.edu" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "atomworks>=1.0.0",
+    "biotite>=1.3.0",
+    "mrcfile>=1.5.4",
+    "python-dotenv>=1.1.1",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
+]
+
+[project.scripts]
+ubiquitous-eureka = "ubiquitous_eureka:main"
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.13.0",
+    "wandb>=0.21.4",
+]
+
+[tool.uv.sources]
+# TODO: Change to PyPI source once atomworks is updated
+atomworks = { git = "ssh://git@github.com/RosettaCommons/atomworks" }
+
+[tool.pytest.ini_options]
+testpaths = "tests"
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--disable-warnings",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
