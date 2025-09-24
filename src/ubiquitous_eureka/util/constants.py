@@ -110,3 +110,41 @@ ATOM_ARRAY_MANDATORY_ANNOTATIONS: Final[tuple[str, ...]] = (
     "atom_name",
     "element",
 )
+
+# TEMPORARY
+ATOM_TYPES: Final[tuple[str, ...]] = (
+    "C", "N", "O", "S", "P",           # Common biological atoms
+    "Mg", "Ca", "Zn", "Fe", "Mn",      # Metal ions
+    "Cl", "Br", "I", "F",              # Halogens
+    "Na", "K", "Se",                   # Others
+    "SOLVENT", "UNKNOWN"               # Special cases
+)
+
+
+# Physical constraint constants for common atoms
+COMMON_BOND_LENGTHS: Final[dict[tuple[str, str], tuple[float, float]]] = {
+    ('C', 'C'): (1.40, 1.65),   ('C', 'N'): (1.25, 1.50),   ('C', 'O'): (1.20, 1.50),
+    ('C', 'S'): (1.70, 1.90),   ('N', 'N'): (1.10, 1.50),   ('N', 'O'): (1.15, 1.45),
+    ('O', 'O'): (1.20, 1.50),   ('S', 'S'): (2.00, 2.10),   ('C', 'P'): (1.75, 1.90),
+    ('N', 'P'): (1.65, 1.80),   ('O', 'P'): (1.45, 1.70),
+    # Metal coordination bonds
+    ('Mg', 'O'): (1.90, 2.30),  ('Ca', 'O'): (2.20, 2.60),  ('Zn', 'N'): (1.90, 2.20),
+    ('Zn', 'O'): (1.90, 2.20),  ('Fe', 'N'): (1.90, 2.20),  ('Fe', 'O'): (1.90, 2.20),
+}
+
+COMMON_BOND_ANGLES: Final[dict[tuple[str, str, str], tuple[float, float]]] = {
+    ('C', 'C', 'C'): (100.0, 130.0),  ('C', 'N', 'C'): (100.0, 125.0),
+    ('C', 'O', 'C'): (100.0, 125.0),  ('N', 'C', 'O'): (110.0, 130.0),
+    ('O', 'P', 'O'): (100.0, 120.0),
+} # in degrees
+
+COMMON_COORDINATION_NUMBERS: Final[dict[str, int]] = {
+    'C': 4, 'N': 3, 'O': 2, 'S': 2, 'P': 4,
+    'Mg': 6, 'Ca': 8, 'Zn': 4, 'Fe': 6, 'Mn': 6
+}
+
+COMMON_VAN_DER_WAALS_RADII: Final[dict[str, float]] = {
+    'C': 1.70, 'N': 1.55, 'O': 1.52, 'S': 1.80, 'P': 1.80,
+    'Mg': 1.73, 'Ca': 2.31, 'Zn': 1.39, 'Fe': 1.32, 'Mn': 1.35,
+    'Cl': 1.75, 'Br': 1.85, 'I': 1.98, 'F': 1.47,
+}
