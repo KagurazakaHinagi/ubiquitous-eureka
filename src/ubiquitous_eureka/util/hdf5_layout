@@ -1,0 +1,42 @@
+/meta
+  schema_version: "1.0"
+  element_table: ["C","N","O","S","P","H", ...]
+  preprocess: { git_sha: "...", cmd: "..." }      # JSON string or attrs
+
+/splits
+  train: ["sample_0001","sample_0002", ...]
+  val:   [...]
+  test:  [...]
+
+/items/{sample_id}/
+  /map/
+    volume           (Z, Y, X) float32
+    spacing          (3,) float32        # voxel size in Å: [sz, sy, sx]
+    origin_world     (3,) float32        # world coord (Å) of voxel (0,0,0)
+    grid_to_world    (4,4) float32       # affine; optional if spacing+origin cover it
+    mask             (Z, Y, X) uint8     # optional valid-region mask
+    seg_labels       (Z, Y, X) int16     # optional per-voxel labels (atom/residue/class)
+    halfmap1         (Z, Y, X) float32   # optional
+    halfmap2         (Z, Y, X) float32   # optional
+    local_res        (Z, Y, X) float32   # optional local resolution
+    stats: {mean, std, norm: "zscore"}   # attrs describing normalization
+    attrs: {axis_order: "zyx", units: "angstrom"}  # attrs
+
+  /structure/
+    coord_world      (N, 3) float32      # Å, same world frame as map
+    element_code     (N,) uint8          # index into /meta/element_table (or store strings)
+    atom_name        (N,) vlen-utf8      # optional
+    res_id           (N,) int32
+    res_name         (N,) vlen-utf8
+    chain_id         (N,) vlen-utf8
+    bonds            (M, 3) int32        # [i, j, type] optional
+    box              (3,3) float32       # optional unit cell
+    per_atom_label   (N,) int16          # optional training labels
+    per_res_label    (R,) int16          # optional
+
+  /patches/                                   # optional, if you predefine crops
+    centers_grid      (K, 3) int32            # voxel indices (z,y,x)
+    size              (3,) int32              # patch window (Zp, Yp, Xp)
+    keep_ratio        float32                 # optional sampling metadata
+
+  attrs: {source_map_path: "...", source_cif_path: "...", emdb_id: "EMD-xxxx", pdb_id: "xxxx"}
