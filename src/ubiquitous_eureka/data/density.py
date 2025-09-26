@@ -2,101 +2,119 @@
 Module for handling 3D density maps.
 """
 
-import copy
+from os import PathLike
 from pathlib import Path
+from typing import Literal
 
 import mrcfile
 import numpy as np
 import torch
 import torch.nn.functional as F
 
+from ubiquitous_eureka.common import detect_device
+from ubiquitous_eureka.util.ndimage import gaussian_blur3d_separable, otsu_threshold
 
+# TODO: logging
 class DensityMap:
     """
     A class to handle 3D density maps, allowing loading from MRC files or directly from
     numpy ndarrays and torch tensors.
+
+    See https://www.ccpem.ac.uk/mrc-format/mrc2014/
     """
 
     def __init__(
         self,
-        filepath: str | None = None,
-        data: np.ndarray | torch.Tensor | None = None,
-        voxel_size: float = 0.5,
-        origin: tuple[float, float, float] = (0, 0, 0),
+        filepath: PathLike | None = None,
+        data: np.ndarray | None = None,  # shape: (z, y, x) or (D, H, W)
+        voxel_size: tuple[float, float, float] | None = None,
+        origin: tuple[float, float, float] | None = None,  # (x, y, z) Angstroms
+        cell_dimensions: tuple[float, float, float] | None = None,
+        axis_correspondence: tuple[int, int, int] = (1, 2, 3),
+        nx: int = 0,
+        ny: int = 0,
+        nz: int = 0,
         device: str | torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ):
         """Initialize DensityMap.
 
         Args:
-            filepath (str | None, optional): Path to MRC file to load. Defaults to None.
-            data (np.ndarray | torch.Tensor | None, optional): Data for the density map. Defaults to None.
+            filepath (PathLike | None, optional): Path to MRC file to load. Defaults to None.
+            data (np.ndarray | None, optional): Data for the density map. Defaults to None.
             voxel_size (float, optional): Voxel size in Angstroms. Defaults to 0.5.
             origin (tuple[float, float, float], optional): Origin coordinates. Defaults to (0, 0, 0).
+            cell_dimensions (tuple[float, float, float], optional): Cell dimensions in Angstroms. Defaults to (0, 0, 0).
+            axis_correspondence (tuple[int, int, int], optional): Axis correspondence. Defaults to (1, 2, 3).
+            nx (int, optional): Number of voxels in x direction. Defaults to 0.
+            ny (int, optional): Number of voxels in y direction. Defaults to 0.
+            nz (int, optional): Number of voxels in z direction. Defaults to 0.
             device (str | torch.device | None, optional): Device to use. Defaults to None for auto-detection.
             dtype (torch.dtype, optional): Data type for torch tensors. Defaults to torch.float32.
         """
 
-        # Device setup
-        if device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.device = "mps" if torch.backends.mps.is_available() else "cpu"
-        else:
-            self.device = device
-
+        self.device = device or detect_device()
         self.dtype = dtype
 
         # Data storage
-        self._data = None
-        self._original_data = None
+        self._data = None  # Axis order: z, y, x
         self._voxel_size = voxel_size
         self._origin = origin
+        self._cell_dimensions = cell_dimensions
+        self._axis_correspondence = axis_correspondence
+        self._nx = nx
+        self._ny = ny
+        self._nz = nz
         self._metadata = {}
 
         if filepath is not None:
             self.load(filepath)
-        elif data is not None:
-            self.set_data(data, voxel_size, origin)
 
-    def to(self, device: str | torch.device) -> "DensityMap":
-        """Move data to specified device."""
-        if isinstance(device, str):
-            device = torch.device(device)
+        self._validate()
 
-        if device != self.device:
-            print(f"Moving data from {self.device} to {device}")
+    def _validate(self) -> None:
+        """Validate the density data is correctly loaded."""
+        if not isinstance(self._data, np.ndarray):
+            raise ValueError("No data loaded to validate.")
+        if not isinstance(self._voxel_size, tuple) or len(self._voxel_size) != 3:
+            raise ValueError("Voxel size is not set or is not a tuple of length 3.")
+        if not isinstance(self._origin, tuple) or len(self._origin) != 3:
+            raise ValueError("Origin is not set or is not a tuple of length 3.")
+        if not isinstance(self._cell_dimensions, tuple) or len(self._cell_dimensions) != 3:
+            raise ValueError("Cell dimensions are not set or is not a tuple of length 3.")
+        if not isinstance(self._axis_correspondence, tuple) or len(self._axis_correspondence) != 3:
+            raise ValueError("Axis correspondence is not set or is not a tuple of length 3.")
+        if not self._metadata:
+            raise ValueError("Metadata is not set or is not a dictionary.")
 
-            if self._data is not None:
-                self._data = self._data.to(device)
-            if self._original_data is not None:
-                self._original_data = self._original_data.to(device)
+    @torch.no_grad()
+    def _data_to_tensor(self) -> torch.Tensor:
+        """Convert the density map data to a torch tensor with shape (D, H, W) -> (1, 1, D, H, W)."""
+        return (
+            torch.from_numpy(self._data)
+            .to(dtype=self.dtype)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .to(device=self.device, non_blocking=True)
+        )
 
-            self.device = device
-
-        return self
+    @torch.no_grad()
+    def _data_from_tensor(self, tensor: torch.Tensor) -> np.ndarray:
+        """Convert a 5D tensor back to a numpy array with shape (1, 1, D, H, W) -> (D, H, W)."""
+        return tensor.squeeze(0).squeeze(0).detach().cpu().numpy()
 
     @property
-    def data(self) -> torch.Tensor | None:
+    def data(self) -> np.ndarray | None:
         """Get the density map data."""
         return self._data
 
     @property
-    def numpy(self) -> np.ndarray | None:
-        """Get the density map data as a numpy array."""
-        return self._data.detach().cpu().numpy() if self._data is not None else None
-
-    @property
-    def shape(self) -> tuple[int, ...] | None:
-        """Get the shape of the density map data."""
-        return self._data.shape if self._data is not None else None
-
-    @property
-    def voxel_size(self) -> float:
+    def voxel_size(self) -> tuple[float, float, float] | None:
         """Get the voxel size."""
         return self._voxel_size
 
     @property
-    def origin(self) -> tuple[float, float, float]:
+    def origin(self) -> tuple[float, float, float] | None:
         """Get the origin coordinates."""
         return self._origin
 
@@ -105,21 +123,24 @@ class DensityMap:
         """Get the metadata dictionary."""
         return self._metadata
 
-    def __repr__(self) -> str:
-        if not isinstance(self._data, torch.Tensor):
-            return f"DensityMap(empty, device={self.device})"
+    def get_world_coordinates(self, voxel_coordinates: tuple[int, int, int]) -> tuple[float, float, float]:
+        """Get the world coordinates of a voxel in (x, y, z) Angstroms."""
+        self._validate()
+
+        assert self._voxel_size is not None
+        assert self._origin is not None
         return (
-            f"DensityMap(shape={self.shape}, voxel_size={self.voxel_size:.3f}Å, "
-            f"origin={self.origin}, range=[{self._data.min():.3f}, {self._data.max():.3f}], "
-            f"device={self.device})"
+            voxel_coordinates[2] * self._voxel_size[2] + self._origin[2],
+            voxel_coordinates[1] * self._voxel_size[1] + self._origin[1],
+            voxel_coordinates[0] * self._voxel_size[0] + self._origin[0],
         )
 
-    def load(self, filepath: str | Path) -> "DensityMap":
+    def load(self, filepath: PathLike) -> "DensityMap":
         """
         Load density map from an MRC file.
 
         Args:
-            filepath (str | Path): Path to the MRC file.
+            filepath (PathLike): Path to the MRC file.
 
         Returns:
             DensityMap: An instance of DensityMap containing the loaded data.
@@ -129,82 +150,79 @@ class DensityMap:
             raise FileNotFoundError(f"File {filepath} does not exist.")
 
         with mrcfile.open(str(filepath), mode="r") as f:
-            if f.data is None:
-                raise ValueError(f"No data found in MRC file {filepath}.")
+            if f.data is None or f.header is None:
+                raise ValueError(f"Density map corrupted or missing in MRC file {filepath}.")
 
-            # Load to cpu first to avoid GPU memory issues
-            data_np = f.data.copy().astype(np.float32)
-            self._data = torch.from_numpy(data_np).to(device=self.device, dtype=self.dtype)
-            self._original_data = self._data.clone()
+            self._data = f.data.copy().astype(np.float32)
 
-            # Get voxel size
-            if f.voxel_size is None:
-                raise ValueError(f"Voxel size not found in MRC file {filepath}.")
-            if f.voxel_size.x != f.voxel_size.y or f.voxel_size.x != f.voxel_size.z:
-                raise ValueError("Anisotropic voxel sizes are not supported.")
-            self._voxel_size = float(f.voxel_size.x)
-
-            # Get origin coordinates
-            if f.header and hasattr(f.header, "origin"):
-                self._origin = (
-                    float(f.header.origin.x),
-                    float(f.header.origin.y),
-                    float(f.header.origin.z),
-                )
-            else:
-                self._origin = (0.0, 0.0, 0.0)
+            self._cell_dimensions = (
+                float(f.header.cella.x),
+                float(f.header.cella.y),
+                float(f.header.cella.z),
+            )
+            self._axis_correspondence = (int(f.header.mapc), int(f.header.mapr), int(f.header.mapn))
+            self._voxel_size = (float(f.voxel_size.x), float(f.voxel_size.y), float(f.voxel_size.z))
+            self._origin = (float(f.header.origin.x), float(f.header.origin.y), float(f.header.origin.z))
+            self._nx = int(f.header.nx)
+            self._ny = int(f.header.ny)
+            self._nz = int(f.header.nz)
 
             # Store additional metadata
             self._metadata = {
                 "filepath": str(filepath),
-                "original_shape": tuple(data_np.shape),
+                "original_shape": tuple(f.data.shape),
                 "original_dtype": str(f.data.dtype),
-                "cell_dimensions": (
-                    float(f.header.cella.x),
-                    float(f.header.cella.y),
-                    float(f.header.cella.z),
-                )
-                if f.header and hasattr(f.header, "cella")
-                else None,
-                "space_group": int(f.header.ispg) if f.header and hasattr(f.header, "ispg") else 1,
-                "map_label": str(f.header.label[0]) if f.header and hasattr(f.header, "label") else "MAP",
+                "space_group": int(f.header.ispg),
+                "map_label": str(f.header.label[0]),
             }
 
-            assert isinstance(self._data, torch.Tensor), "Data is not a torch tensor."
             print(f"Loaded: {self}")
 
             return self
 
-    def save(self, filepath: str | Path, overwrite: bool = True) -> "DensityMap":
+    def save(self, filepath: PathLike, overwrite: bool = True) -> "DensityMap":
         """
         Save the density map to an MRC file.
 
         Args:
-            filepath (str | Path): Path to save the MRC file.
+            filepath (PathLike): Path to save the MRC file.
             overwrite (bool, optional): Whether to overwrite existing files. Defaults to True.
 
         Returns:
             DensityMap: The current instance for chaining.
         """
-        if not isinstance(self._data, torch.Tensor):
-            raise ValueError("No data to save.")
+        self._validate()
 
         filepath = Path(filepath)
         if filepath.exists() and not overwrite:
             raise FileExistsError(f"File {filepath} already exists and overwrite is set to False.")
 
-        # Convert data to numpy for saving
-        data_np = self.numpy
-
         with mrcfile.new(str(filepath), overwrite=overwrite) as f:
             assert f.header is not None, "MRC file header is missing."
-            f.set_data(data_np)
+            f.set_data(self._data)
             f.voxel_size = self._voxel_size
 
             # Set origins in header
-            f.header.origin.x = self._origin[0]
-            f.header.origin.y = self._origin[1]
-            f.header.origin.z = self._origin[2]
+            assert self._origin is not None
+            f.header.origin.x = np.float32(self._origin[0])
+            f.header.origin.y = np.float32(self._origin[1])
+            f.header.origin.z = np.float32(self._origin[2])
+
+            # Set cell dimensions
+            assert self._cell_dimensions is not None
+            f.header.cella.x = np.float32(self._cell_dimensions[0])
+            f.header.cella.y = np.float32(self._cell_dimensions[1])
+            f.header.cella.z = np.float32(self._cell_dimensions[2])
+
+            # Set number of voxels
+            f.header.nx = np.int32(self._nx)
+            f.header.ny = np.int32(self._ny)
+            f.header.nz = np.int32(self._nz)
+
+            # Set axis correspondence
+            f.header.mapc = np.int32(self._axis_correspondence[0])
+            f.header.mapr = np.int32(self._axis_correspondence[1])
+            f.header.mapn = np.int32(self._axis_correspondence[2])
 
             # Update header statistics
             f.update_header_from_data()
@@ -214,57 +232,8 @@ class DensityMap:
 
         return self
 
-    def set_data(
-        self,
-        data: np.ndarray | torch.Tensor,
-        voxel_size: float | None = None,
-        origin: tuple[float, float, float] | None = None,
-    ) -> "DensityMap":
-        """
-        Set the density map data directly from a numpy array or torch tensor.
-
-        Args:
-            data (np.ndarray | torch.Tensor): The density map data.
-            voxel_size (float | None, optional): Voxel size in Angstroms. If None, keeps existing. Defaults to None.
-            origin (tuple[float, float, float] | None, optional): Origin coordinates. If None, keeps existing. Defaults to None.
-        Returns:
-            DensityMap: The current instance for chaining.
-        """
-        if isinstance(data, np.ndarray):
-            self._data = torch.from_numpy(data.astype(np.float32)).to(device=self.device, dtype=self.dtype)
-        else:
-            self._data = data.to(device=self.device, dtype=self.dtype)
-        self._original_data = self._data.clone()
-
-        if voxel_size is not None:
-            self._voxel_size = voxel_size
-        if origin is not None:
-            self._origin = origin
-
-        return self
-
-    def reset(self) -> "DensityMap":
-        """Reset the density map to its original state."""
-        if not isinstance(self._original_data, torch.Tensor):
-            print("No original data to reset to.")
-            return self
-
-        self._data = self._original_data.clone()
-        print("Density map has been reset to its original state.")
-        return self
-
-    def copy(self) -> "DensityMap":
-        """Create a deep copy of the density map."""
-        new_map = DensityMap(device=self.device, dtype=self.dtype)
-        new_map._data = self._data.clone() if self._data is not None else None
-        new_map._original_data = self._original_data.clone() if self._original_data is not None else None
-        new_map._voxel_size = self._voxel_size
-        new_map._origin = self._origin
-        new_map._metadata = copy.deepcopy(self._metadata)
-
-        return new_map
-
-    def resample(self, target_voxel_size: float, mode: str = "trilinear") -> "DensityMap":
+    @torch.no_grad()
+    def resample(self, target_voxel_size: float | tuple[float, float, float], mode: str = "trilinear") -> "DensityMap":
         """
         Resample the density map to the target voxel size.
 
@@ -275,138 +244,227 @@ class DensityMap:
         Returns:
             DensityMap: The resampled density map.
         """
-        if not isinstance(self._data, torch.Tensor):
-            raise ValueError("No data loaded to resample.")
-        if target_voxel_size <= 0:
-            raise ValueError("Target voxel size must be positive.")
+        self._validate()
 
-        zoom_factor = self._voxel_size / target_voxel_size
-        new_size = [int(dim * zoom_factor) for dim in self._data.shape]
+        if isinstance(target_voxel_size, (int, float)):
+            target_voxel_size = (target_voxel_size, target_voxel_size, target_voxel_size)
+
+        # Compute output grid size
+        assert self._cell_dimensions is not None
+        new_nx = max(1, int(round(self._cell_dimensions[0] / target_voxel_size[0])))
+        new_ny = max(1, int(round(self._cell_dimensions[1] / target_voxel_size[1])))
+        new_nz = max(1, int(round(self._cell_dimensions[2] / target_voxel_size[2])))
 
         print(
             f"Resampling from voxel size {self._voxel_size:.3f}Å to {target_voxel_size:.3f}Å "
-            f"with zoom factor {zoom_factor:.3f}, new shape: {new_size} "
+            f"with new shape: {(new_nx, new_ny, new_nz)} "
             f"using {mode} interpolation on {self.device}."
         )
-        print(f"Shape: {self._data.shape} -> {new_size}")
 
-        # Add batch and channel dimensions
-        data_5d = self._data.unsqueeze(0).unsqueeze(0)
+        # Prepare torch tensor for GPU-accelerated interpolation
+        data_5d = self._data_to_tensor()
 
-        with torch.no_grad():
-            resampled_5d = F.interpolate(
-                data_5d,
-                size=new_size,
-                mode=mode,
-                align_corners=False if mode == "trilinear" else None,
-            )
+        resampled_5d = F.interpolate(
+            data_5d,
+            size=(new_nz, new_ny, new_nx),
+            mode=mode,
+            align_corners=False if mode == "trilinear" else None,
+            recompute_scale_factor=False,
+        )
 
-        # Remove batch and channel dimensions
-        self._data = resampled_5d.squeeze(0).squeeze(0)
+        self._data = self._data_from_tensor(resampled_5d)
+
+        # Update data attributes
         self._voxel_size = target_voxel_size
+        self._nx = new_nx
+        self._ny = new_ny
+        self._nz = new_nz
+        self._cell_dimensions = (
+            target_voxel_size[0] * new_nx,
+            target_voxel_size[1] * new_ny,
+            target_voxel_size[2] * new_nz,
+        )  # Recompute cell dimensions to match new shape
 
+        self._validate()
         print(f"Resampling complete. New voxel size: {self._voxel_size:.3f}Å, new shape: {self._data.shape}")
+
         return self
 
-    def normalize(self, percentile_range: tuple[float, float] = (5, 95)) -> "DensityMap":
+    @torch.no_grad()
+    def _foreground_mask(
+        self,
+        t: torch.Tensor,
+        method: Literal["otsu", "quantile"] = "otsu",
+        sigma: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        quantile: float = 0.75,
+        min_positive_voxels: int = 1024,
+    ) -> torch.Tensor:
         """
-        Normalize the density map data to the range [0, 1] based on specified percentiles.
+        Create a foreground mask based on the density map data.
 
         Args:
-            percentile_range (tuple[float, float], optional): Percentiles for normalization. Defaults to (5, 95).
+            method (Literal["otsu", "quantile"], optional): Method to use for thresholding. Defaults to "otsu".
+            sigma (tuple[float, float, float], optional): Sigma for Gaussian blur. Defaults to (1.0, 1.0, 1.0).
+            quantile (float, optional): Quantile for quantile thresholding. Defaults to 0.75.
+            min_positive_voxels (int, optional): Minimum number of positive voxels to consider. Defaults to 1024.
+
+        Returns:
+            Foreground mask.
+        """
+        device, dtype = t.device, t.dtype
+
+        # Smooth (help separate background solvent from foreground signal)
+        smoothed_t = gaussian_blur3d_separable(t, sigmas=sigma)
+
+        # Base positive region
+        base_positive_t = smoothed_t > 0
+
+        # Fallback if almost nothing is positive
+        if int(base_positive_t.sum().item()) < min_positive_voxels:
+            # Fallback to global stats: mean + std
+            mean, std = smoothed_t.mean(), smoothed_t.std()
+            threshold = mean + std
+            return smoothed_t > threshold
+
+        positive_values = smoothed_t[base_positive_t]
+
+        # Method-specific thresholding
+        if method == "otsu":
+            threshold = otsu_threshold(positive_values)
+            threshold = torch.maximum(threshold, torch.tensor(0.0, dtype=dtype, device=device))
+        elif method == "quantile":
+            threshold = torch.quantile(positive_values, quantile)
+            threshold = torch.maximum(threshold, torch.tensor(0.0, dtype=dtype, device=device))
+        else:
+            raise ValueError(f"Invalid method: {method}")
+
+        return smoothed_t > threshold
+
+    @torch.no_grad()
+    def _normalize_tensor_robust_zscore(
+        self,
+        t: torch.Tensor,
+        clip: float = 3.0,
+        eps: float = 1e-8,
+        foreground_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Normalize a tensor using robust Z-score masking.
+
+        Args:
+            t (torch.Tensor): Tensor to normalize.
+            clip (float, optional): Clip the normalized values to this value. Defaults to 3.0.
+            eps (float, optional): Epsilon for numerical stability. Defaults to 1e-8.
+            foreground_mask (torch.Tensor | None, optional): Foreground mask. Defaults to None.
+
+        Returns:
+            Normalized tensor.
+        """
+        vals = t[foreground_mask] if foreground_mask is not None else t
+        med = vals.median()
+        mad = (vals - med).abs().median()
+        rstd = 1.4826 * mad
+        tz = (t - med) / (rstd + eps)
+        if clip is not None:
+            tz = torch.clamp(tz, -clip, clip)
+            tz = tz / clip
+        return tz
+
+    @torch.no_grad()
+    def _normalize_tensor_zscore(
+        self,
+        t: torch.Tensor,
+        clip: float = 3.0,
+        eps: float = 1e-8,
+        foreground_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Normalize a tensor using Z-score masking.
+
+        Args:
+            t (torch.Tensor): Tensor to normalize.
+            clip (float, optional): Clip the normalized values to this value. Defaults to 3.0.
+            eps (float, optional): Epsilon for numerical stability. Defaults to 1e-8.
+            foreground_mask (torch.Tensor | None, optional): Foreground mask. Defaults to None.
+
+        Returns:
+            Normalized tensor.
+        """
+        vals = t[foreground_mask] if foreground_mask is not None else t
+        mean = vals.mean()
+        std = vals.std()
+        tz = (t - mean) / (std + eps)
+        if clip is not None:
+            tz = torch.clamp(tz, -clip, clip)
+            tz = tz / clip
+        return tz
+
+    @torch.no_grad()
+    def _normalize_tensor_percentile(
+        self,
+        t: torch.Tensor,
+        percentile_range: tuple[float, float] = (1, 99),
+        clip: float = 1.0,
+        eps: float = 1e-8,
+        foreground_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Normalize a tensor using percentile masking.
+
+        Args:
+            t (torch.Tensor): Tensor to normalize.
+            percentile_range (tuple[float, float], optional): Percentiles for normalization. Defaults to (1, 99).
+            clip (float, optional): Clip the normalized values to this value. Defaults to 1.0.
+            eps (float, optional): Epsilon for numerical stability. Defaults to 1e-8.
+            foreground_mask (torch.Tensor | None, optional): Foreground mask. Defaults to None.
+
+        Returns:
+            Normalized tensor.
+        """
+        vals = t[foreground_mask] if foreground_mask is not None else t
+        lower_bound = torch.quantile(vals, percentile_range[0] / 100.0)
+        upper_bound = torch.quantile(vals, percentile_range[1] / 100.0)
+        if clip is not None:
+            t = torch.clamp(t, -clip, clip)
+        t_norm = 2.0 * (t - lower_bound) / (upper_bound - lower_bound + eps) - 1.0
+        return t_norm
+
+    @torch.no_grad()
+    def normalize(
+        self,
+        mode: Literal["robust_zscore", "zscore", "percentile"] = "robust_zscore",
+        foreground_mask: Literal["otsu", "quantile", "none"] = "otsu",
+        percentile_range: tuple[float, float] = (1, 99),
+    ) -> "DensityMap":
+        """
+        Normalize the density map data to the range [-1, 1] based on specified mode.
+
+        Args:
+            mode (Literal["robust_zscore", "zscore", "percentile"], optional): Method to use for normalization. Defaults to "robust_zscore".
+            foreground_mask (Literal["otsu", "quantile", "none"], optional): Whether to generate and use a foreground mask. Defaults to "otsu".
+            percentile_range (tuple[float, float], optional): Percentiles for normalization if mode is "percentile". Defaults to (1, 99).
 
         Returns:
             DensityMap: The normalized density map.
         """
-        if not isinstance(self._data, torch.Tensor):
-            raise ValueError("No data loaded to normalize.")
-        if not (0 <= percentile_range[0] < percentile_range[1] <= 100):
-            raise ValueError("Percentile range must be between 0 and 100 and min < max.")
+        self._validate()
 
-        with torch.no_grad():
-            lower_bound = torch.quantile(self._data, percentile_range[0] / 100.0)
-            upper_bound = torch.quantile(self._data, percentile_range[1] / 100.0)
+        data_3d = torch.from_numpy(self._data).to(device=self.device, dtype=self.dtype)
+        mask = self._foreground_mask(data_3d, method=foreground_mask) if foreground_mask != "none" else None
 
-            clipped_data = torch.clamp(self._data, min=lower_bound, max=upper_bound)
+        if mode == "robust_zscore":
+            normalized_3d = self._normalize_tensor_robust_zscore(data_3d, foreground_mask=mask)
+        elif mode == "zscore":
+            normalized_3d = self._normalize_tensor_zscore(data_3d, foreground_mask=mask)
+        elif mode == "percentile":
+            normalized_3d = self._normalize_tensor_percentile(
+                data_3d, foreground_mask=mask, percentile_range=percentile_range
+            )
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
 
-            if upper_bound == lower_bound:
-                print("Warning: Upper and lower bounds are equal. Normalization will result in zero data.")
-                self._data.fill_(0.5)  # Set to mid-range if no variation
-            else:
-                self._data = (clipped_data - lower_bound) / (upper_bound - lower_bound)
+        self._data = normalized_3d.detach().cpu().numpy()
 
-        print(
-            f"Normalization complete using percentiles {percentile_range}. "
-            f"Data range is now [{self._data.min():.3f}, {self._data.max():.3f}]."
-        )
-        return self
-
-    def gaussian_filter(self, sigma: float) -> "DensityMap":
-        """
-        Apply a Gaussian filter to the density map.
-
-        Args:
-            sigma (float): Standard deviation for Gaussian kernel in voxel units.
-
-        Returns:
-            DensityMap: The filtered density map.
-        """
-        if not isinstance(self._data, torch.Tensor):
-            raise ValueError("No data loaded to apply Gaussian filter.")
-        if sigma <= 0:
-            raise ValueError("Sigma must be positive.")
-
-        with torch.no_grad():
-            # Create 3D Gaussian kernel
-            kernel_size = int(6 * sigma + 1)
-            if kernel_size % 2 == 0:
-                kernel_size += 1  # Ensure kernel size is odd
-
-            # Create 1D Gaussian kernel
-            x = torch.arange(kernel_size, dtype=self.dtype, device=self.device) - kernel_size // 2
-            kernel_1d = torch.exp(-0.5 * (x / sigma) ** 2)
-            kernel_1d /= kernel_1d.sum()
-
-            # Create 3D kernel by outer product
-            kernel_3d = kernel_1d.view(1, 1, 1, 1, -1) * kernel_1d.view(1, 1, 1, -1, 1) * kernel_1d.view(1, 1, -1, 1, 1)
-
-            # Add batch and channel dimensions
-            data_5d = self._data.unsqueeze(0).unsqueeze(0)
-
-            # Apply convolution with padding
-            padding = kernel_size // 2
-            filtered_5d = F.conv3d(data_5d, kernel_3d, padding=padding)
-
-            # Remove batch and channel dimensions
-            self._data = filtered_5d.squeeze(0).squeeze(0)
-
-        print(f"Applied Gaussian filter with sigma={sigma} voxels.")
-        return self
-
-    def threshold(self, threshold_value: float, below_value: float = 0.0) -> "DensityMap":
-        """
-        Apply a threshold to the density map, setting values below the threshold to a specified value.
-
-        Args:
-            threshold_value (float): The threshold value.
-            below_value (float, optional): Value to set for voxels below the threshold. Defaults to 0.0.
-
-        Returns:
-            DensityMap: The thresholded density map.
-        """
-        if not isinstance(self._data, torch.Tensor):
-            raise ValueError("No data loaded to apply threshold.")
-
-        with torch.no_grad():
-            mask = self._data < threshold_value
-            original_below_count = mask.sum().item()
-
-            self._data[mask] = below_value
-
-        print(
-            f"Applied threshold at {threshold_value}. "
-            f"Set {original_below_count} voxels below threshold to {below_value}."
-        )
         return self
 
     def crop(self, start: tuple[int, int, int], end: tuple[int, int, int]) -> "DensityMap":
@@ -420,22 +478,22 @@ class DensityMap:
         Returns:
             DensityMap: The cropped density map.
         """
-        if not isinstance(self._data, torch.Tensor):
-            raise ValueError("No data loaded to crop.")
+        self._validate()
 
         # Validate indices
         start = (max(0, start[0]), max(0, start[1]), max(0, start[2]))
         end = (
-            min(self._data.shape[0], end[0]),
-            min(self._data.shape[1], end[1]),
-            min(self._data.shape[2], end[2]),
+            min(self._nz, end[0]),
+            min(self._ny, end[1]),
+            min(self._nx, end[2]),
         )
 
-        with torch.no_grad():
-            self._data = self._data[start[0] : end[0], start[1] : end[1], start[2] : end[2]]
+        assert self._data is not None
+        self._data = self._data[start[0] : end[0], start[1] : end[1], start[2] : end[2]]
 
-        # Update origin based on cropping
-        origin_shift = tuple(start[i] * self._voxel_size for i in range(3))
+        assert self._voxel_size is not None
+        assert self._origin is not None
+        origin_shift = tuple(start[i] * self._voxel_size[i] for i in range(3))[::-1]
         self._origin = (
             self._origin[0] + origin_shift[0],
             self._origin[1] + origin_shift[1],
@@ -443,72 +501,4 @@ class DensityMap:
         )
 
         print(f"Cropped density map to region: {start} - {end}.")
-        return self
-
-    def pad(
-        self,
-        padding: int | tuple[int, int, int],
-        mode: str = "constant",
-        value: float = 0.0,
-    ) -> "DensityMap":
-        """
-        Pad the density map with specified padding and mode.
-
-        Args:
-            padding (int | tuple[int, int, int]): Amount of padding. If int, pads all sides equally.
-            mode (str, optional): Padding mode ('constant', 'reflect', 'replicate', 'circular'). Defaults to "constant".
-            value (float, optional): Value to use for 'constant' padding. Defaults to 0.0.
-
-        Returns:
-            DensityMap: The padded density map.
-        """
-        if not isinstance(self._data, torch.Tensor):
-            raise ValueError("No data loaded to pad.")
-
-        if isinstance(padding, int):
-            # (left, right, top, bottom, front, back)
-            pad_tuple = (padding, padding, padding, padding, padding, padding)
-        else:
-            # (pad_z, pad_y, pad_x)
-            pad_tuple = (
-                padding[2],
-                padding[2],
-                padding[1],
-                padding[1],
-                padding[0],
-                padding[0],
-            )
-
-        with torch.no_grad():
-            self._data = (
-                F.pad(
-                    self._data.unsqueeze(0).unsqueeze(0),
-                    pad_tuple,
-                    mode=mode,
-                    value=value,
-                )
-                .squeeze(0)
-                .squeeze(0)
-            )
-
-        # Update origin based on padding
-        if isinstance(padding, int):
-            origin_shift = (
-                padding * self._voxel_size,
-                padding * self._voxel_size,
-                padding * self._voxel_size,
-            )
-        else:
-            origin_shift = (
-                padding[0] * self._voxel_size,
-                padding[1] * self._voxel_size,
-                padding[2] * self._voxel_size,
-            )
-        self._origin = (
-            self._origin[0] - origin_shift[0],
-            self._origin[1] - origin_shift[1],
-            self._origin[2] - origin_shift[2],
-        )
-
-        print(f"Padded density map with {pad_tuple} using mode '{mode}'.")
         return self

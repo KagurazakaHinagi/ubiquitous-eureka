@@ -19,7 +19,7 @@ from biotite.structure import AtomArray, AtomArrayStack
 from ubiquitous_eureka.data.density import DensityMap
 from ubiquitous_eureka.util.constants import BACKBONE_ATOMS
 
-
+# TODO: logging
 class Structure:
     """
     Class for handling molecular structures from PDB/mmCIF files.
@@ -66,7 +66,7 @@ class Structure:
         return self._atom_array
 
     @property
-    def filepath(self) -> Path | None:
+    def filepath(self) -> PathLike | None:
         """Get the file path of the loaded structure."""
         return self._filepath
 
@@ -105,11 +105,11 @@ class Structure:
                 parsed_structure = parser.parse(filepath, hydrogen_policy="remove")
                 if (
                     parsed_structure is None
-                    or "assembly" not in parsed_structure
-                    or len(parsed_structure["assembly"]) == 0
+                    or "assemblies" not in parsed_structure
+                    or len(parsed_structure["assemblies"]) == 0
                 ):
                     raise ValueError("Parsed structure is empty or missing assembly information.")
-                self._assembly = parsed_structure["assembly"]
+                self._assembly = parsed_structure["assemblies"]
                 self._metadata = parsed_structure.get("metadata", {})
                 self._chain_info = parsed_structure.get("chain_info", None)
                 self._ligand_info = parsed_structure.get("ligand_info", None)
@@ -187,7 +187,7 @@ class Structure:
         if not isinstance(self._atom_array, AtomArray):
             return np.empty((0, 3))
         coord = self._atom_array.coord
-        return coord or np.empty((0, 3))
+        return coord if coord is not None else np.empty((0, 3))
 
     @coordinates.setter
     def coordinates(self, coords: np.ndarray | torch.Tensor):
@@ -419,46 +419,5 @@ class Structure:
         Returns:
             DensityMap: DensityMap object representing the simulated density map.
         """
-
-        if not isinstance(self._atom_array, AtomArray):
-            raise ValueError("No valid structure loaded to convert to density map.")
-
-        device = device or self.device
-
-        # Get bounding box with padding using vectorized operations
-        coords = self.coordinates
-        min_coords = coords.min(axis=0) - padding
-        max_coords = coords.max(axis=0) + padding
-
-        # Calculate grid dimensions
-        grid_dims = np.ceil((max_coords - min_coords) / voxel_size).astype(int)
-
-        print(f"Generating density map with dimensions: {grid_dims} on device: {device}")
-
-        # Initialize empty density grid
-        device_torch = torch.device(device)
-        z_grid, y_grid, x_grid = torch.meshgrid(
-            torch.arange(grid_dims[2], device=device_torch) * voxel_size + min_coords[2],
-            torch.arange(grid_dims[1], device=device_torch) * voxel_size + min_coords[1],
-            torch.arange(grid_dims[0], device=device_torch) * voxel_size + min_coords[0],
-            indexing="ij",
-        )
-
-        # Initialize density map
-        density = torch.zeros_like(z_grid)
-
-        # Convert coordinates to torch tensor
-        coords_tensor = torch.from_numpy(coords).to(device_torch)
-
-        # Add Gaussian for each atom
-        for i, (x, y, z) in enumerate(coords_tensor):
-            # Calculate squared distance from the atom to each voxel
-            dist_squared = (x_grid - x) ** 2 + (y_grid - y) ** 2 + (z_grid - z) ** 2
-            # Add Gaussian contribution
-            density += torch.exp(-dist_squared / (2 * sigma**2))
-
-        # Create DensityMap object
-        density_map = DensityMap(device=device)
-        density_map.set_data(density.cpu().numpy(), voxel_size=voxel_size, origin=min_coords)
-
-        return density_map
+        raise NotImplementedError("Not implemented yet.")
+        # TODO: Use https://github.com/cryoem/eman2/blob/139f6add95707af2f7aa34916e0b4dfe94c49a31/programs/e2pdb2mrc.py
