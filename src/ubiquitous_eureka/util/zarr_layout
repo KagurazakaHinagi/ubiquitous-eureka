@@ -1,0 +1,26 @@
+/meta
+  schema_version: <git_hash>
+  creation_time: <timestamp>
+
+/items/{sample_id}/
+  /map/
+    volume           (Z, Y, X) float32
+    voxel_size       (3,) float32        # voxel size in Å: [z, y, x]
+    origin_world     (3,) float32        # world coord (Å) of voxel in (0, 0, 0)
+    # local_res        (Z, Y, X) float32   # optional local resolution
+
+    attrs: {transforms: ["...", "..."], simulated: bool}
+
+  /structure/
+    !coord_world      (N, 3) float32      # Å, same world frame as map, in (x, y, z) order
+    !atomic_number     (N,) uint8         # index into /meta/element_table (or store strings)
+    !is_backbone      (N,) bool           # optional
+    !chain_type       (N,) uint8          # optional
+    atom_name        (N,) str             # optional
+    res_id           (N,) int32
+    !res_name         (N,) str
+    chain_id         (N,) uint8
+    bonds            (M, 3) int32         # [i, j, type] optional
+    bonds_type       (M, 3) uint8         # [i, j, type] optional
+
+  attrs: {emdb_id: "EMD-xxxx", wwpdb_id: "xxxx"}
