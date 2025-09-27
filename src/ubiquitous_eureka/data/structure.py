@@ -2,7 +2,8 @@
 Module for handling molecular structures from PDB/mmCIF files.
 """
 
-import warnings
+import logging
+import re
 from os import PathLike
 from pathlib import Path
 from typing import Literal
@@ -19,7 +20,9 @@ from biotite.structure import AtomArray, AtomArrayStack
 from ubiquitous_eureka.data.density import DensityMap
 from ubiquitous_eureka.util.constants import BACKBONE_ATOMS
 
-# TODO: logging
+logger = logging.getLogger(__name__)
+
+
 class Structure:
     """
     Class for handling molecular structures from PDB/mmCIF files.
@@ -28,6 +31,7 @@ class Structure:
     def __init__(
         self,
         filepath: PathLike | None = None,
+        wwpdb_id: str | None = None,
         atom_array: AtomArray | None = None,
         device: str | torch.device | None = None,
     ):
@@ -35,6 +39,7 @@ class Structure:
 
         Args:
             filepath (PathLike | None, optional): Path to PDB or mmCIF file. Defaults to None.
+            wwpdb_id (str | None, optional): wwPDB ID. Defaults to None.
             atom_array (AtomArray | None, optional): Biotite AtomArray object. Defaults to None.
             device (str | torch.device | None, optional): Device for tensor operations. Defaults to None.
         """
@@ -46,6 +51,7 @@ class Structure:
         else:
             self.device = torch.device(device)
 
+        self._wwpdb_id = wwpdb_id
         self._atom_array = None
         self._filepath = None
         self._metadata = {}
@@ -58,6 +64,18 @@ class Structure:
             self.load(filepath)
         elif atom_array is not None:
             self._atom_array = atom_array.copy()
+
+    @property
+    def wwpdb_id(self) -> str | None:
+        """Get the wwPDB ID."""
+        return self._wwpdb_id
+
+    @wwpdb_id.setter
+    def wwpdb_id(self, wwpdb_id: str):
+        """Set the wwPDB ID."""
+        if not re.match(r"^[0-9A-Za-z]{4}$", wwpdb_id):
+            raise ValueError(f"Invalid wwPDB ID: {wwpdb_id}")
+        self._wwpdb_id = wwpdb_id
 
     @property
     def atom_array(self) -> AtomArray | None:
@@ -80,6 +98,28 @@ class Structure:
         """Set metadata dictionary."""
         self._metadata = metadata
 
+    def get_annotation(self, field: str) -> np.ndarray:
+        """Get the annotation of the atoms."""
+        if self._atom_array is None:
+            raise ValueError("No atom array loaded to get annotation.")
+        return self._atom_array.get_annotation(field)
+
+    def get_all_bonds(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """Get all bonds from the atom array."""
+        if self._atom_array is None:
+            raise ValueError("No atom array loaded to get all bonds.")
+
+        if self._atom_array.bonds is None:
+            return None
+
+        return self._atom_array.bonds.get_all_bonds()
+
+    def get_int_chain_ids(self) -> np.ndarray:
+        """Get the integer chain ids from the atom array."""
+        if self._atom_array is None:
+            raise ValueError("No atom array loaded to get integer chain ids.")
+        return np.array([ord(i.upper()) - ord("A") for i in self.get_annotation("chain_id")], dtype=np.uint8)
+
     def load(self, filepath: PathLike, clean_load: bool = True) -> "Structure":
         """
         Load structure from PDB or mmCIF file via AtomWorks IO for cleaning.
@@ -100,7 +140,7 @@ class Structure:
         self._filepath = filepath
 
         if clean_load:
-            print(f"Loading and cleaning structure from {filepath} using AtomWorks IO...")
+            logger.info(f"Loading and cleaning structure from {filepath} using AtomWorks IO...")
             try:
                 parsed_structure = parser.parse(filepath, hydrogen_policy="remove")
                 if (
@@ -122,7 +162,7 @@ class Structure:
                 raise RuntimeError(f"Failed to load and clean structure from {filepath}: {e}")
 
         else:
-            print(f"Loading structure from {filepath} using Biotite...")
+            logger.info(f"Loading structure from {filepath} using Biotite...")
             try:
                 self._atom_array = load_any(filepath)
 
@@ -132,7 +172,7 @@ class Structure:
         # If multiple models, take the first one only.
         if isinstance(self._atom_array, AtomArrayStack):
             if len(self._atom_array) > 1:
-                print("Warning: Multiple models found. Using the first model.")
+                logger.warning("Multiple models found. Using the first model.")
             self._atom_array = self._atom_array[0]
 
         # Remove atoms with NaN coordinates
@@ -140,9 +180,9 @@ class Structure:
         self._atom_array = remove_nan_coords(self._atom_array)
 
         if isinstance(self._atom_array, AtomArray) and len(self._atom_array) > 0:
-            print(f"Loaded structure from {filepath} with {len(self._atom_array)} valid atoms.")
+            logger.info(f"Loaded structure from {filepath} with {len(self._atom_array)} valid atoms.")
         else:
-            warnings.warn(f"Loaded structure from {filepath} but atom array is empty or invalid.")
+            logger.warning(f"Loaded structure from {filepath} but atom array is empty or invalid.")
         return self
 
     def save(self, filepath: PathLike, fileformat: str = "auto") -> "Structure":
@@ -164,7 +204,7 @@ class Structure:
         if fileformat == "auto":
             fileformat = "pdb" if filepath.suffix.lower() in [".pdb", ".ent"] else "cif"
 
-        print(f"Saving structure to {filepath} in {fileformat} format...")
+        logger.info(f"Saving structure to {filepath} in {fileformat} format...")
 
         try:
             if fileformat == "pdb":

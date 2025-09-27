@@ -1,5 +1,6 @@
 """
-Module for multi-dimensional image processing. Optimized for 3D volumes.
+Module for multi-dimensional image processing.
+Optimized for single-channel 3D volumes.
 """
 
 import torch

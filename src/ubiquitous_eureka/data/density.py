@@ -2,6 +2,8 @@
 Module for handling 3D density maps.
 """
 
+import logging
+import re
 from os import PathLike
 from pathlib import Path
 from typing import Literal
@@ -14,7 +16,9 @@ import torch.nn.functional as F
 from ubiquitous_eureka.common import detect_device
 from ubiquitous_eureka.util.ndimage import gaussian_blur3d_separable, otsu_threshold
 
-# TODO: logging
+logger = logging.getLogger(__name__)
+
+
 class DensityMap:
     """
     A class to handle 3D density maps, allowing loading from MRC files or directly from
@@ -26,29 +30,24 @@ class DensityMap:
     def __init__(
         self,
         filepath: PathLike | None = None,
+        emdb_id: str | None = None,
         data: np.ndarray | None = None,  # shape: (z, y, x) or (D, H, W)
         voxel_size: tuple[float, float, float] | None = None,
         origin: tuple[float, float, float] | None = None,  # (x, y, z) Angstroms
         cell_dimensions: tuple[float, float, float] | None = None,
-        axis_correspondence: tuple[int, int, int] = (1, 2, 3),
-        nx: int = 0,
-        ny: int = 0,
-        nz: int = 0,
         device: str | torch.device | None = None,
         dtype: torch.dtype = torch.float32,
+        **kwargs,
     ):
         """Initialize DensityMap.
 
         Args:
             filepath (PathLike | None, optional): Path to MRC file to load. Defaults to None.
+            emdb_id (str | None, optional): EMDB ID. Defaults to None.
             data (np.ndarray | None, optional): Data for the density map. Defaults to None.
             voxel_size (float, optional): Voxel size in Angstroms. Defaults to 0.5.
             origin (tuple[float, float, float], optional): Origin coordinates. Defaults to (0, 0, 0).
             cell_dimensions (tuple[float, float, float], optional): Cell dimensions in Angstroms. Defaults to (0, 0, 0).
-            axis_correspondence (tuple[int, int, int], optional): Axis correspondence. Defaults to (1, 2, 3).
-            nx (int, optional): Number of voxels in x direction. Defaults to 0.
-            ny (int, optional): Number of voxels in y direction. Defaults to 0.
-            nz (int, optional): Number of voxels in z direction. Defaults to 0.
             device (str | torch.device | None, optional): Device to use. Defaults to None for auto-detection.
             dtype (torch.dtype, optional): Data type for torch tensors. Defaults to torch.float32.
         """
@@ -61,11 +60,14 @@ class DensityMap:
         self._voxel_size = voxel_size
         self._origin = origin
         self._cell_dimensions = cell_dimensions
-        self._axis_correspondence = axis_correspondence
-        self._nx = nx
-        self._ny = ny
-        self._nz = nz
-        self._metadata = {}
+        self._emdb_id = emdb_id
+        self._metadata = kwargs
+
+        # Calculate nx, ny, nz
+        if self._data is not None:
+            self._nx = self._data.shape[2]
+            self._ny = self._data.shape[1]
+            self._nz = self._data.shape[0]
 
         if filepath is not None:
             self.load(filepath)
@@ -82,10 +84,6 @@ class DensityMap:
             raise ValueError("Origin is not set or is not a tuple of length 3.")
         if not isinstance(self._cell_dimensions, tuple) or len(self._cell_dimensions) != 3:
             raise ValueError("Cell dimensions are not set or is not a tuple of length 3.")
-        if not isinstance(self._axis_correspondence, tuple) or len(self._axis_correspondence) != 3:
-            raise ValueError("Axis correspondence is not set or is not a tuple of length 3.")
-        if not self._metadata:
-            raise ValueError("Metadata is not set or is not a dictionary.")
 
     @torch.no_grad()
     def _data_to_tensor(self) -> torch.Tensor:
@@ -117,6 +115,20 @@ class DensityMap:
     def origin(self) -> tuple[float, float, float] | None:
         """Get the origin coordinates."""
         return self._origin
+
+    @property
+    def emdb_id(self) -> str | None:
+        """Get the EMDB ID."""
+        return self._emdb_id
+
+    @emdb_id.setter
+    def emdb_id(self, emdb_id: str):
+        """Set the EMDB ID."""
+        if re.match(r"^EMD-\d{4,5}$", emdb_id):
+            emdb_id = emdb_id.split("-")[1]
+        if not re.match(r"^\d{4,5}$", emdb_id):
+            raise ValueError(f"Invalid EMDB ID: {emdb_id}")
+        self._emdb_id = emdb_id
 
     @property
     def metadata(self) -> dict:
@@ -160,7 +172,6 @@ class DensityMap:
                 float(f.header.cella.y),
                 float(f.header.cella.z),
             )
-            self._axis_correspondence = (int(f.header.mapc), int(f.header.mapr), int(f.header.mapn))
             self._voxel_size = (float(f.voxel_size.x), float(f.voxel_size.y), float(f.voxel_size.z))
             self._origin = (float(f.header.origin.x), float(f.header.origin.y), float(f.header.origin.z))
             self._nx = int(f.header.nx)
@@ -176,7 +187,7 @@ class DensityMap:
                 "map_label": str(f.header.label[0]),
             }
 
-            print(f"Loaded: {self}")
+            logger.info(f"Loaded density map from {filepath}.")
 
             return self
 
@@ -214,21 +225,11 @@ class DensityMap:
             f.header.cella.y = np.float32(self._cell_dimensions[1])
             f.header.cella.z = np.float32(self._cell_dimensions[2])
 
-            # Set number of voxels
-            f.header.nx = np.int32(self._nx)
-            f.header.ny = np.int32(self._ny)
-            f.header.nz = np.int32(self._nz)
-
-            # Set axis correspondence
-            f.header.mapc = np.int32(self._axis_correspondence[0])
-            f.header.mapr = np.int32(self._axis_correspondence[1])
-            f.header.mapn = np.int32(self._axis_correspondence[2])
-
             # Update header statistics
             f.update_header_from_data()
             f.update_header_stats()
 
-        print(f"Saved density map to {filepath}")
+        logger.info(f"Saved density map to {filepath}.")
 
         return self
 
@@ -255,7 +256,7 @@ class DensityMap:
         new_ny = max(1, int(round(self._cell_dimensions[1] / target_voxel_size[1])))
         new_nz = max(1, int(round(self._cell_dimensions[2] / target_voxel_size[2])))
 
-        print(
+        logger.info(
             f"Resampling from voxel size {self._voxel_size:.3f}Å to {target_voxel_size:.3f}Å "
             f"with new shape: {(new_nx, new_ny, new_nz)} "
             f"using {mode} interpolation on {self.device}."
@@ -286,12 +287,12 @@ class DensityMap:
         )  # Recompute cell dimensions to match new shape
 
         self._validate()
-        print(f"Resampling complete. New voxel size: {self._voxel_size:.3f}Å, new shape: {self._data.shape}")
+        logger.info(f"Resampling complete. New voxel size: {self._voxel_size:.3f}Å, new shape: {self._data.shape}")
 
         return self
 
     @torch.no_grad()
-    def _foreground_mask(
+    def foreground_mask(
         self,
         t: torch.Tensor,
         method: Literal["otsu", "quantile"] = "otsu",
@@ -338,6 +339,8 @@ class DensityMap:
         else:
             raise ValueError(f"Invalid method: {method}")
 
+        logger.debug(f"Foreground mask created with threshold: {threshold:.3f}.")
+
         return smoothed_t > threshold
 
     @torch.no_grad()
@@ -368,6 +371,7 @@ class DensityMap:
         if clip is not None:
             tz = torch.clamp(tz, -clip, clip)
             tz = tz / clip
+        logger.debug(f"Normalized tensor using Z-score masking with clip: {clip:.3f}.")
         return tz
 
     @torch.no_grad()
@@ -397,6 +401,7 @@ class DensityMap:
         if clip is not None:
             tz = torch.clamp(tz, -clip, clip)
             tz = tz / clip
+        logger.debug(f"Normalized tensor using Z-score masking with clip: {clip:.3f}.")
         return tz
 
     @torch.no_grad()
@@ -427,6 +432,7 @@ class DensityMap:
         if clip is not None:
             t = torch.clamp(t, -clip, clip)
         t_norm = 2.0 * (t - lower_bound) / (upper_bound - lower_bound + eps) - 1.0
+        logger.debug(f"Normalized tensor using percentile masking with clip: {clip:.3f}.")
         return t_norm
 
     @torch.no_grad()
@@ -450,7 +456,7 @@ class DensityMap:
         self._validate()
 
         data_3d = torch.from_numpy(self._data).to(device=self.device, dtype=self.dtype)
-        mask = self._foreground_mask(data_3d, method=foreground_mask) if foreground_mask != "none" else None
+        mask = self.foreground_mask(data_3d, method=foreground_mask) if foreground_mask != "none" else None
 
         if mode == "robust_zscore":
             normalized_3d = self._normalize_tensor_robust_zscore(data_3d, foreground_mask=mask)
@@ -464,6 +470,10 @@ class DensityMap:
             raise ValueError(f"Invalid mode: {mode}")
 
         self._data = normalized_3d.detach().cpu().numpy()
+
+        logger.info(
+            f"Normalized density map using {mode} mode with foreground mask: {foreground_mask} and percentile range: {percentile_range}."
+        )
 
         return self
 
@@ -500,5 +510,5 @@ class DensityMap:
             self._origin[2] + origin_shift[2],
         )
 
-        print(f"Cropped density map to region: {start} - {end}.")
+        logger.info(f"Cropped density map to region: {start} - {end}.")
         return self
